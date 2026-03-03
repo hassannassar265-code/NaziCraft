@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>3D Battle Royale - GOAT Edition</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #87ceeb; font-family: 'Arial Black', sans-serif; cursor: crosshair; }
+        #ui { position: absolute; top: 20px; left: 20px; color: white; pointer-events: none; z-index: 10; -webkit-text-stroke: 1px black; }
+        #inventory { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 15px; }
+        .slot { width: 90px; height: 90px; background: rgba(0,0,0,0.6); border: 4px solid #444; color: #aaa; display: flex; align-items: center; justify-content: center; border-radius: 12px; transition: 0.1s; }
+        .active { border-color: #f1c40f; background: rgba(241, 196, 15, 0.4); color: white; transform: scale(1.1); box-shadow: 0 0 20px rgba(241, 196, 15, 0.5); }
+        #deathScreen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(139, 0, 0, 0.8); display: none; flex-direction: column; align-items: center; justify-content: center; color: white; z-index: 100; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 18px; height: 18px; border: 2px solid white; border-radius: 50%; transform: translate(-50%, -50%); }
+        #admin-status { color: #f1c40f; font-size: 14px; display: none; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1 id="hp" style="color:#ff4d4d; margin:0; font-size: 40px;">HP: 100</h1>
+        <h2 id="kills" style="margin:0;">KILLS: 0</h2>
+        <div id="admin-status">GOD MODE: ACTIVE</div>
+    </div>
+    <div id="deathScreen">
+        <h1>ELIMINATED</h1>
+        <h2 id="finalKills">KILLS: 0</h2>
+        <p>Press R to Respawn</p>
+    </div>
+    <div id="inventory">
+        <div id="slot1" class="slot active">MACE</div>
+        <div id="slot2" class="slot">RPG</div>
+    </div>
+    <div id="crosshair"></div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+<script type="module">
+    import * as THREE from 'three';
+
+    // --- TEXTURES ---
+    function createNoiseTex(c1, c2) {
+        const s = 64; const canvas = document.createElement('canvas'); canvas.width = s; canvas.height = s;
+        const ctx = canvas.getContext('2d');
+        for(let i=0; i<s; i+=4) { for(let j=0; j<s; j+=4) { ctx.fillStyle = Math.random() > 0.5 ? c1 : c2; ctx.fillRect(i,j,4,4); } }
+        return new THREE.CanvasTexture(canvas);
+    }
+    const camoTex = createNoiseTex('#2d5a27', '#1e3a1a');
+    const rustTex = createNoiseTex('#444444', '#aa4400');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+    dirLight.position.set(50, 100, 50);
+    scene.add(dirLight);
+
+    // --- TERRAIN ---
+    const worldSize = 600;
+    const terrainGeo = new THREE.PlaneGeometry(worldSize, worldSize, 70, 70);
+    const pos = terrainGeo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+        let x = pos.getX(i), y = pos.getY(i);
+        pos.setZ(i, Math.sin(x*0.04) * Math.cos(y*0.04) * 10);
+    }
+    terrainGeo.computeVertexNormals();
+    const terrain = new THREE.Mesh(terrainGeo, new THREE.MeshStandardMaterial({ color: 0x4caf50, flatShading: true }));
+    terrain.rotation.x = -Math.PI / 2;
+    scene.add(terrain);
+
+    function getH(x, z) { return Math.sin(x*0.04) * Math.cos(z*0.04) * 10; }
+
+    // --- PLAYER ---
+    const player = new THREE.Group();
+    const pBody = new THREE.Mesh(new THREE.CapsuleGeometry(0.5, 1.2), new THREE.MeshStandardMaterial({ map: camoTex }));
+    pBody.position.y = 1.1;
+    player.add(pBody);
+    scene.add(player);
+    
+    const rig = new THREE.Group(); rig.position.y = 2.5; player.add(rig);
+    camera.position.set(0, 1.2, 8); rig.add(camera);
+
+    // --- STATE ---
+    let hp = 100, kills = 0, keys = {}, enemies = [], projectiles = [], isLocked = false;
+    let vY = 0, gravity = -0.018, jumpPower = 0.5, jumpsLeft = 2, curWep = 1, pitch = 0;
+    let godMode = false;
+
+    function switchWeapon(id) {
+        curWep = id;
+        document.getElementById('slot1').className = curWep === 1 ? 'slot active' : 'slot';
+        document.getElementById('slot2').className = curWep === 2 ? 'slot active' : 'slot';
+    }
+
+    window.addEventListener('wheel', (e) => { if (isLocked) switchWeapon(curWep === 1 ? 2 : 1); });
+    
+    window.onkeydown = (e) => {
+        keys[e.code] = true;
+        if(e.key === '1') switchWeapon(1);
+        if(e.key === '2') switchWeapon(2);
+        if(e.key === 'r' && hp <= 0) location.reload();
+        
+        // ADMIN KEY
+        if(e.key === 'g') { 
+            godMode = !godMode; 
+            document.getElementById('admin-status').style.display = godMode ? 'block' : 'none';
+        }
+
+        // JUMP
+        if(e.code === 'Space' && (jumpsLeft > 0 || godMode) && isLocked) {
+            vY = jumpPower;
+            if(!godMode) jumpsLeft--;
+        }
+    };
+    window.onkeyup = (e) => keys[e.code] = false;
+
+    document.addEventListener('mousemove', (e) => {
+        if (isLocked) {
+            player.rotation.y -= e.movementX * 0.003;
+            pitch -= e.movementY * 0.003; // STANDARD Y
+            pitch = Math.max(-0.9, Math.min(0.9, pitch));
+            rig.rotation.x = pitch;
+        }
+    });
+
+    window.onmousedown = () => {
+        if(!isLocked) { document.body.requestPointerLock(); return; }
+        if(hp <= 0) return;
+        if(curWep === 1) { // MACE
+            let hit = false;
+            enemies.forEach((en, i) => {
+                if(en.position.distanceTo(player.position) < 7) {
+                    scene.remove(en); enemies.splice(i, 1); kills++; hit = true;
+                }
+            });
+            if(hit && vY < 0) { vY = 0.85; jumpsLeft = 1; }
+        } else { // RPG
+            const r = new THREE.Mesh(new THREE.SphereGeometry(0.4), new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
+            r.position.copy(player.position).y += 2;
+            const d = new THREE.Vector3(0,0,-1).applyQuaternion(rig.quaternion).applyQuaternion(player.quaternion);
+            r.userData = { v: d.multiplyScalar(1.8) };
+            projectiles.push(r); scene.add(r);
+        }
+    };
+
+    function spawnEn() {
+        if(!isLocked || hp <= 0) return;
+        const en = new THREE.Mesh(new THREE.CapsuleGeometry(0.6, 1.4), new THREE.MeshStandardMaterial({map: rustTex}));
+        const x = player.position.x + (Math.random()*150-75), z = player.position.z + (Math.random()*150-75);
+        en.position.set(x, getH(x,z)+1, z);
+        enemies.push(en); scene.add(en);
+    }
+    setInterval(spawnEn, 2500);
+
+    function animate() {
+        requestAnimationFrame(animate);
+        if(!isLocked || (hp <= 0 && !godMode)) return;
+
+        let baseSpeed = keys['ShiftLeft'] ? 0.45 : 0.22;
+        let s = godMode ? baseSpeed * 2 : baseSpeed;
+        
+        if(keys['KeyW']) player.translateZ(-s);
+        if(keys['KeyS']) player.translateZ(s);
+        if(keys['KeyA']) player.translateX(-s);
+        if(keys['KeyD']) player.translateX(s);
+
+        vY += gravity; player.position.y += vY;
+        const ground = getH(player.position.x, player.position.z);
+        if(player.position.y <= ground) {
+            player.position.y = ground;
+            vY = 0;
+            jumpsLeft = 2;
+        }
+
+        projectiles.forEach((p, i) => {
+            p.position.add(p.userData.v);
+            if(p.position.y <= getH(p.position.x, p.position.z)) {
+                if(p.position.distanceTo(player.position) < 10) { vY = 1.0; jumpsLeft = 1; }
+                scene.remove(p); projectiles.splice(i, 1);
+            }
+        });
+
+        enemies.forEach(en => {
+            let d = new THREE.Vector3().subVectors(player.position, en.position).normalize();
+            en.position.x += d.x * 0.14; en.position.z += d.z * 0.14;
+            en.position.y = getH(en.position.x, en.position.z) + 1;
+            en.lookAt(player.position);
+            if(en.position.distanceTo(player.position) < 2.2 && !godMode) {
+                hp = Math.max(0, hp - 0.5);
+            }
+        });
+
+        document.getElementById('hp').innerText = "HP: " + Math.ceil(hp);
+        document.getElementById('kills').innerText = "KILLS: " + kills;
+
+        if(hp <= 0 && !godMode) {
+            document.getElementById('deathScreen').style.display = 'flex';
+            document.getElementById('finalKills').innerText = "KILLS: " + kills;
+            document.exitPointerLock();
+        }
+        renderer.render(scene, camera);
+    }
+    document.addEventListener('pointerlockchange', () => { isLocked = (document.pointerLockElement === document.body); });
+    animate();
+</script>
+</body>
+</html>
